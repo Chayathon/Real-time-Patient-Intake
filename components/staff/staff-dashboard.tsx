@@ -13,9 +13,11 @@ import {
 } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import {
+    PATIENT_FIELD_BLURRED_EVENT,
     PATIENT_FIELD_CHANGED_EVENT,
     PATIENT_INTAKE_CHANNEL,
     PATIENT_SUBMITTED_EVENT,
+    type PatientFieldBlurredPayload,
     type PatientFieldChangedPayload,
     type PatientFormField,
     type PatientPresencePayload,
@@ -107,12 +109,17 @@ export function StaffDashboard() {
     const [draftValues, setDraftValues] = useState<PatientFormValues>(
         patientFormDefaultValues,
     );
+    const [pendingDraftValues, setPendingDraftValues] =
+        useState<PatientFormValues>(patientFormDefaultValues);
     const [status, setStatus] = useState<PatientRealtimeStatus>("inactive");
     const [isPatientOnline, setIsPatientOnline] = useState(false);
     const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
     const [lastSubmittedAt, setLastSubmittedAt] = useState<string | null>(null);
     const [lastChangedField, setLastChangedField] =
         useState<PatientFormField | null>(null);
+    const [typingField, setTypingField] = useState<PatientFormField | null>(
+        null,
+    );
 
     const syncPatientPresence = useCallback((channel: RealtimeChannel) => {
         const allPresence = Object.values(
@@ -145,12 +152,13 @@ export function StaffDashboard() {
                         return;
                     }
 
-                    setDraftValues((current) => ({
-                        ...current,
-                        [field]: data.value,
+                    setPendingDraftValues((previous) => ({
+                        ...previous,
+                        [field]: data.value ?? "",
                     }));
 
                     setLastChangedField(field);
+                    setTypingField(field);
                     setStatus("typing");
 
                     const updatedAt =
@@ -162,17 +170,49 @@ export function StaffDashboard() {
             )
             .on(
                 "broadcast",
+                { event: PATIENT_FIELD_BLURRED_EVENT },
+                ({ payload }) => {
+                    const data = payload as Partial<PatientFieldBlurredPayload>;
+                    const field = data.field;
+
+                    if (!field) {
+                        return;
+                    }
+
+                    const value = data.value ?? "";
+
+                    setPendingDraftValues((previous) => ({
+                        ...previous,
+                        [field]: value,
+                    }));
+                    setDraftValues((previous) => ({
+                        ...previous,
+                        [field]: value,
+                    }));
+                    setLastChangedField(field);
+                    setTypingField(null);
+                    setLastUpdatedAt(
+                        data.updatedAt || new Date().toISOString(),
+                    );
+                    setStatus("inactive");
+                    setIsPatientOnline(true);
+                },
+            )
+            .on(
+                "broadcast",
                 { event: PATIENT_SUBMITTED_EVENT },
                 ({ payload }) => {
                     const data = payload as PatientSubmittedPayload;
                     const submittedAt =
                         data.submittedAt || new Date().toISOString();
 
+                    setPendingDraftValues(data.values);
                     setDraftValues(data.values);
                     setStatus("submitted");
                     setLastUpdatedAt(submittedAt);
                     setLastSubmittedAt(submittedAt);
                     setLastChangedField(null);
+                    setTypingField(null);
                     setIsPatientOnline(true);
                 },
             )
@@ -198,6 +238,15 @@ export function StaffDashboard() {
             supabase.removeChannel(channel);
         };
     }, [syncPatientPresence]);
+
+    useEffect(() => {
+        if (status !== "inactive") {
+            return;
+        }
+
+        setDraftValues(pendingDraftValues);
+        setTypingField(null);
+    }, [pendingDraftValues, status]);
 
     const statusLabel =
         status === "submitted"
@@ -291,24 +340,26 @@ export function StaffDashboard() {
                             >
                                 {category.fields.map((field) => {
                                     const value = draftValues[field];
-                                    const isRecentlyChanged =
-                                        lastChangedField === field;
+                                    const isTypingField =
+                                        status === "typing" &&
+                                        typingField === field;
 
                                     return (
                                         <div
                                             key={field}
                                             className={cn(
                                                 "rounded-md border border-neutral-200 p-3 transition-colors",
-                                                isRecentlyChanged &&
-                                                    status === "typing" &&
+                                                isTypingField &&
                                                     "border-emerald-300 bg-emerald-50/50",
                                             )}
                                         >
                                             <p className="text-xs text-neutral-500 mb-1">
                                                 {fieldLabels[field]}
                                             </p>
-                                            <p className="text-sm font-medium text-neutral-900 break-words min-h-5">
-                                                {value || "-"}
+                                            <p className="text-sm font-medium text-neutral-900 wrap-break-word min-h-5">
+                                                {isTypingField
+                                                    ? "typing..."
+                                                    : value || "-"}
                                             </p>
                                         </div>
                                     );
