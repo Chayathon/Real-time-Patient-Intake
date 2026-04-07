@@ -48,6 +48,7 @@ const createPatientSessionId = () => `patient-${crypto.randomUUID()}`;
 
 export function PatientForm() {
     const [isSubmitting, setIsSubmitting] = useState(false);
+    const [isSubmitted, setIsSubmitted] = useState(false);
     const [isRealtimeReady, setIsRealtimeReady] = useState(false);
     const [sessionId] = useState(createPatientSessionId);
 
@@ -55,7 +56,6 @@ export function PatientForm() {
     const inactivityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
         null,
     );
-    const isResettingRef = useRef(false);
     const lastTrackedPresenceStatusRef = useRef<PatientRealtimeStatus | null>(
         null,
     );
@@ -66,7 +66,6 @@ export function PatientForm() {
         control,
         formState: { errors },
         getValues,
-        reset,
         watch,
     } = useForm<PatientFormValues>({
         resolver: zodResolver(patientFormSchema),
@@ -160,10 +159,6 @@ export function PatientForm() {
 
     const handleFieldBlur = useCallback(
         (field: PatientFormField, value?: string) => {
-            if (isResettingRef.current) {
-                return;
-            }
-
             const payload: PatientFieldBlurredPayload = {
                 sessionId,
                 field,
@@ -174,13 +169,7 @@ export function PatientForm() {
             void sendFieldBlurred(payload);
             clearInactivityTimer();
         },
-        [
-            clearInactivityTimer,
-            getValues,
-            sendFieldBlurred,
-            sessionId,
-            updatePresenceStatus,
-        ],
+        [clearInactivityTimer, getValues, sendFieldBlurred, sessionId],
     );
 
     const registerWithRealtimeBlur = useCallback(
@@ -251,7 +240,7 @@ export function PatientForm() {
 
     useEffect(() => {
         const subscription = watch((values, context) => {
-            if (!context.name || isResettingRef.current) {
+            if (!context.name) {
                 return;
             }
 
@@ -297,14 +286,11 @@ export function PatientForm() {
 
             console.log("Form Submitted Successfully:", data);
             toast.success("Patient registered successfully!");
-
-            isResettingRef.current = true;
-            reset(patientFormDefaultValues);
+            setIsSubmitted(true);
         } catch (error) {
             console.error("Failed to submit patient form:", error);
             toast.error("Unable to submit patient form. Please try again.");
         } finally {
-            isResettingRef.current = false;
             setIsSubmitting(false);
         }
     };
@@ -329,6 +315,7 @@ export function PatientForm() {
                         <Input
                             id="firstName"
                             placeholder="John"
+                            disabled={isSubmitted}
                             {...registerWithRealtimeBlur("firstName")}
                         />
                         {errors.firstName && (
@@ -345,6 +332,7 @@ export function PatientForm() {
                         <Input
                             id="middleName"
                             placeholder="M."
+                            disabled={isSubmitted}
                             {...registerWithRealtimeBlur("middleName")}
                         />
                     </div>
@@ -356,6 +344,7 @@ export function PatientForm() {
                         <Input
                             id="lastName"
                             placeholder="Doe"
+                            disabled={isSubmitted}
                             {...registerWithRealtimeBlur("lastName")}
                         />
                         {errors.lastName && (
@@ -373,6 +362,7 @@ export function PatientForm() {
                         <Input
                             id="dob"
                             type="date"
+                            disabled={isSubmitted}
                             {...registerWithRealtimeBlur("dob")}
                         />
                         {errors.dob && (
@@ -393,6 +383,7 @@ export function PatientForm() {
                                 <Select
                                     onValueChange={field.onChange}
                                     value={field.value}
+                                    disabled={isSubmitted}
                                 >
                                     <SelectTrigger
                                         id="gender"
@@ -436,6 +427,7 @@ export function PatientForm() {
                             id="nationality"
                             placeholder="e.g. Thai, American"
                             {...registerWithRealtimeBlur("nationality")}
+                            disabled={isSubmitted}
                         />
                         {errors.nationality && (
                             <p className="text-sm text-red-500">
@@ -453,6 +445,7 @@ export function PatientForm() {
                                 <Select
                                     onValueChange={field.onChange}
                                     value={field.value}
+                                    disabled={isSubmitted}
                                 >
                                     <SelectTrigger
                                         id="religion"
@@ -507,6 +500,7 @@ export function PatientForm() {
                             id="phone"
                             type="tel"
                             placeholder="+66 81 234 5678"
+                            disabled={isSubmitted}
                             {...registerWithRealtimeBlur("phone")}
                         />
                         {errors.phone && (
@@ -525,6 +519,7 @@ export function PatientForm() {
                             id="email"
                             type="email"
                             placeholder="john.doe@example.com"
+                            disabled={isSubmitted}
                             {...registerWithRealtimeBlur("email")}
                         />
                         {errors.email && (
@@ -541,6 +536,7 @@ export function PatientForm() {
                         <Textarea
                             id="address"
                             placeholder="123 Example Street..."
+                            disabled={isSubmitted}
                             {...registerWithRealtimeBlur("address")}
                         />
                         {errors.address && (
@@ -562,6 +558,7 @@ export function PatientForm() {
                                 <Select
                                     onValueChange={field.onChange}
                                     value={field.value}
+                                    disabled={isSubmitted}
                                 >
                                     <SelectTrigger
                                         id="preferredLanguage"
@@ -621,6 +618,7 @@ export function PatientForm() {
                         <Input
                             id="emergencyContactName"
                             placeholder="Jane Doe"
+                            disabled={isSubmitted}
                             {...registerWithRealtimeBlur(
                                 "emergencyContactName",
                             )}
@@ -638,6 +636,7 @@ export function PatientForm() {
                                 <Select
                                     onValueChange={field.onChange}
                                     value={field.value}
+                                    disabled={isSubmitted}
                                 >
                                     <SelectTrigger
                                         id="emergencyContactRelationship"
@@ -687,12 +686,16 @@ export function PatientForm() {
 
             <div className="w-full flex justify-end">
                 <Button
-                    disabled={isSubmitting}
+                    disabled={isSubmitting || isSubmitted}
                     size="lg"
                     type="submit"
                     className="w-full sm:w-auto font-bold cursor-pointer"
                 >
-                    {isSubmitting ? "Submitting..." : "Register Patient"}
+                    {isSubmitting
+                        ? "Submitting..."
+                        : isSubmitted
+                          ? "Registered"
+                          : "Register Patient"}
                 </Button>
             </div>
         </form>
