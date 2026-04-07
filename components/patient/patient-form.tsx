@@ -26,9 +26,11 @@ import {
 } from "@/components/ui/select";
 import {
     INACTIVE_TIMEOUT_MS,
+    PATIENT_FIELD_BLURRED_EVENT,
     PATIENT_FIELD_CHANGED_EVENT,
     PATIENT_INTAKE_CHANNEL,
     PATIENT_SUBMITTED_EVENT,
+    type PatientFieldBlurredPayload,
     type PatientFieldChangedPayload,
     type PatientFormField,
     type PatientPresencePayload,
@@ -63,6 +65,7 @@ export function PatientForm() {
         handleSubmit,
         control,
         formState: { errors },
+        getValues,
         reset,
         watch,
     } = useForm<PatientFormValues>({
@@ -112,6 +115,22 @@ export function PatientForm() {
         [isRealtimeReady],
     );
 
+    const sendFieldBlurred = useCallback(
+        async (payload: PatientFieldBlurredPayload) => {
+            const channel = channelRef.current;
+            if (!channel || !isRealtimeReady) {
+                return;
+            }
+
+            await channel.send({
+                type: "broadcast",
+                event: PATIENT_FIELD_BLURRED_EVENT,
+                payload,
+            });
+        },
+        [isRealtimeReady],
+    );
+
     const sendSubmitted = async (payload: PatientSubmittedPayload) => {
         const channel = channelRef.current;
         if (!channel || !isRealtimeReady) {
@@ -138,6 +157,50 @@ export function PatientForm() {
             void updatePresenceStatus("inactive");
         }, INACTIVE_TIMEOUT_MS);
     }, [clearInactivityTimer, updatePresenceStatus]);
+
+    const handleFieldBlur = useCallback(
+        (field: PatientFormField, value?: string) => {
+            if (isResettingRef.current) {
+                return;
+            }
+
+            const payload: PatientFieldBlurredPayload = {
+                sessionId,
+                field,
+                value: value ?? String(getValues(field) ?? ""),
+                updatedAt: new Date().toISOString(),
+            };
+
+            void sendFieldBlurred(payload);
+            clearInactivityTimer();
+        },
+        [
+            clearInactivityTimer,
+            getValues,
+            sendFieldBlurred,
+            sessionId,
+            updatePresenceStatus,
+        ],
+    );
+
+    const registerWithRealtimeBlur = useCallback(
+        (fieldName: PatientFormField) => {
+            const registered = register(fieldName);
+
+            return {
+                ...registered,
+                onBlur: (
+                    event: React.FocusEvent<
+                        HTMLInputElement | HTMLTextAreaElement
+                    >,
+                ) => {
+                    registered.onBlur(event);
+                    handleFieldBlur(fieldName, event.target.value);
+                },
+            };
+        },
+        [handleFieldBlur, register],
+    );
 
     useEffect(() => {
         const channel = supabase.channel(PATIENT_INTAKE_CHANNEL, {
@@ -188,25 +251,23 @@ export function PatientForm() {
 
     useEffect(() => {
         const subscription = watch((values, context) => {
-            if (
-                !context.name ||
-                context.type !== "change" ||
-                isResettingRef.current
-            ) {
+            if (!context.name || isResettingRef.current) {
                 return;
             }
 
             const field = context.name as PatientFormField;
-            const payload: PatientFieldChangedPayload = {
+            const payload = {
                 sessionId,
                 field,
                 value: String(values[field]),
                 updatedAt: new Date().toISOString(),
             };
 
-            void sendFieldChange(payload);
-            void updatePresenceStatus("typing");
-            scheduleInactivePresence();
+            if (context.type === "change") {
+                void sendFieldChange(payload);
+                void updatePresenceStatus("typing");
+                scheduleInactivePresence();
+            }
         });
 
         return () => {
@@ -268,7 +329,7 @@ export function PatientForm() {
                         <Input
                             id="firstName"
                             placeholder="John"
-                            {...register("firstName")}
+                            {...registerWithRealtimeBlur("firstName")}
                         />
                         {errors.firstName && (
                             <p className="text-sm text-red-500">
@@ -284,7 +345,7 @@ export function PatientForm() {
                         <Input
                             id="middleName"
                             placeholder="M."
-                            {...register("middleName")}
+                            {...registerWithRealtimeBlur("middleName")}
                         />
                     </div>
 
@@ -295,7 +356,7 @@ export function PatientForm() {
                         <Input
                             id="lastName"
                             placeholder="Doe"
-                            {...register("lastName")}
+                            {...registerWithRealtimeBlur("lastName")}
                         />
                         {errors.lastName && (
                             <p className="text-sm text-red-500">
@@ -309,7 +370,11 @@ export function PatientForm() {
                             Date of Birth{" "}
                             <span className="text-red-500">*</span>
                         </Label>
-                        <Input id="dob" type="date" {...register("dob")} />
+                        <Input
+                            id="dob"
+                            type="date"
+                            {...registerWithRealtimeBlur("dob")}
+                        />
                         {errors.dob && (
                             <p className="text-sm text-red-500">
                                 {errors.dob.message}
@@ -332,6 +397,13 @@ export function PatientForm() {
                                     <SelectTrigger
                                         id="gender"
                                         className="w-full"
+                                        onBlur={() => {
+                                            field.onBlur();
+                                            handleFieldBlur(
+                                                "gender",
+                                                String(field.value ?? ""),
+                                            );
+                                        }}
                                     >
                                         <SelectValue placeholder="Select gender" />
                                     </SelectTrigger>
@@ -363,7 +435,7 @@ export function PatientForm() {
                         <Input
                             id="nationality"
                             placeholder="e.g. Thai, American"
-                            {...register("nationality")}
+                            {...registerWithRealtimeBlur("nationality")}
                         />
                         {errors.nationality && (
                             <p className="text-sm text-red-500">
@@ -385,6 +457,13 @@ export function PatientForm() {
                                     <SelectTrigger
                                         id="religion"
                                         className="w-full"
+                                        onBlur={() => {
+                                            field.onBlur();
+                                            handleFieldBlur(
+                                                "religion",
+                                                String(field.value ?? ""),
+                                            );
+                                        }}
                                     >
                                         <SelectValue placeholder="Select religion" />
                                     </SelectTrigger>
@@ -428,7 +507,7 @@ export function PatientForm() {
                             id="phone"
                             type="tel"
                             placeholder="+66 81 234 5678"
-                            {...register("phone")}
+                            {...registerWithRealtimeBlur("phone")}
                         />
                         {errors.phone && (
                             <p className="text-sm text-red-500">
@@ -446,7 +525,7 @@ export function PatientForm() {
                             id="email"
                             type="email"
                             placeholder="john.doe@example.com"
-                            {...register("email")}
+                            {...registerWithRealtimeBlur("email")}
                         />
                         {errors.email && (
                             <p className="text-sm text-red-500">
@@ -462,7 +541,7 @@ export function PatientForm() {
                         <Textarea
                             id="address"
                             placeholder="123 Example Street..."
-                            {...register("address")}
+                            {...registerWithRealtimeBlur("address")}
                         />
                         {errors.address && (
                             <p className="text-sm text-red-500">
@@ -487,6 +566,13 @@ export function PatientForm() {
                                     <SelectTrigger
                                         id="preferredLanguage"
                                         className="w-full"
+                                        onBlur={() => {
+                                            field.onBlur();
+                                            handleFieldBlur(
+                                                "preferredLanguage",
+                                                String(field.value ?? ""),
+                                            );
+                                        }}
                                     >
                                         <SelectValue placeholder="Select language" />
                                     </SelectTrigger>
@@ -535,7 +621,9 @@ export function PatientForm() {
                         <Input
                             id="emergencyContactName"
                             placeholder="Jane Doe"
-                            {...register("emergencyContactName")}
+                            {...registerWithRealtimeBlur(
+                                "emergencyContactName",
+                            )}
                         />
                     </div>
 
@@ -554,6 +642,13 @@ export function PatientForm() {
                                     <SelectTrigger
                                         id="emergencyContactRelationship"
                                         className="w-full"
+                                        onBlur={() => {
+                                            field.onBlur();
+                                            handleFieldBlur(
+                                                "emergencyContactRelationship",
+                                                String(field.value ?? ""),
+                                            );
+                                        }}
                                     >
                                         <SelectValue placeholder="Select relationship" />
                                     </SelectTrigger>
