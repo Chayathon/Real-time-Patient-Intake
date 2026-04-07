@@ -1,15 +1,15 @@
 "use client";
 
-import React, { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { RealtimeChannel } from "@supabase/supabase-js";
 import { useForm, Controller } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import * as z from "zod";
+import { toast } from "sonner";
 
 import {
     Card,
     CardContent,
     CardDescription,
-    CardFooter,
     CardHeader,
     CardTitle,
 } from "@/components/ui/card";
@@ -24,36 +24,39 @@ import {
     SelectTrigger,
     SelectValue,
 } from "@/components/ui/select";
+import {
+    INACTIVE_TIMEOUT_MS,
+    PATIENT_FIELD_CHANGED_EVENT,
+    PATIENT_INTAKE_CHANNEL,
+    PATIENT_SUBMITTED_EVENT,
+    type PatientFieldChangedPayload,
+    type PatientFormField,
+    type PatientPresencePayload,
+    type PatientRealtimeStatus,
+    type PatientSubmittedPayload,
+} from "@/lib/realtime";
+import {
+    patientFormDefaultValues,
+    patientFormSchema,
+    type PatientFormValues,
+} from "@/lib/validations";
+import { supabase } from "@/utils/supabase/client";
 
-const patientFormSchema = z.object({
-    firstName: z.string().min(1, { message: "First name is required" }),
-    middleName: z.string().optional(),
-    lastName: z.string().min(1, { message: "Last name is required" }),
-    dob: z.string().min(1, { message: "Date of Birth is required" }),
-    gender: z.string().min(1, { message: "Gender is required" }),
-    phone: z
-        .string()
-        .min(9, { message: "Phone number must be at least 9 characters" })
-        .regex(/^[0-9+\-\s()]*$/, { message: "Invalid phone number format" }),
-    email: z
-        .string()
-        .min(1, { message: "Email is required" })
-        .email({ message: "Invalid email address" }),
-    address: z.string().min(1, { message: "Address is required" }),
-    preferredLanguage: z
-        .string()
-        .min(1, { message: "Preferred language is required" }),
-    nationality: z.string().min(1, { message: "Nationality is required" }),
-    religion: z.string().optional(),
-    emergencyContactName: z.string().optional(),
-    emergencyContactRelationship: z.string().optional(),
-});
-
-type PatientFormValues = z.infer<typeof patientFormSchema>;
+const createPatientSessionId = () => `patient-${crypto.randomUUID()}`;
 
 export function PatientForm() {
     const [isSubmitting, setIsSubmitting] = useState(false);
-    const [successMessage, setSuccessMessage] = useState("");
+    const [isRealtimeReady, setIsRealtimeReady] = useState(false);
+    const [sessionId] = useState(createPatientSessionId);
+
+    const channelRef = useRef<RealtimeChannel | null>(null);
+    const inactivityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+        null,
+    );
+    const isResettingRef = useRef(false);
+    const lastTrackedPresenceStatusRef = useRef<PatientRealtimeStatus | null>(
+        null,
+    );
 
     const {
         register,
@@ -61,33 +64,188 @@ export function PatientForm() {
         control,
         formState: { errors },
         reset,
+        watch,
     } = useForm<PatientFormValues>({
         resolver: zodResolver(patientFormSchema),
-        defaultValues: {
-            firstName: "",
-            middleName: "",
-            lastName: "",
-            dob: "",
-            gender: "",
-            phone: "",
-            email: "",
-            address: "",
-            preferredLanguage: "",
-            nationality: "",
-            religion: "",
-            emergencyContactName: "",
-            emergencyContactRelationship: "",
-        },
+        defaultValues: patientFormDefaultValues,
     });
+
+    const updatePresenceStatus = useCallback(
+        async (status: PatientRealtimeStatus) => {
+            const channel = channelRef.current;
+            if (!channel || !isRealtimeReady) {
+                return;
+            }
+
+            if (lastTrackedPresenceStatusRef.current === status) {
+                return;
+            }
+
+            const presencePayload: PatientPresencePayload = {
+                sessionId,
+                status,
+                updatedAt: new Date().toISOString(),
+            };
+
+            const result = await channel.track(presencePayload);
+
+            if (result === "ok") {
+                lastTrackedPresenceStatusRef.current = status;
+            }
+        },
+        [isRealtimeReady, sessionId],
+    );
+
+    const sendFieldChange = useCallback(
+        async (payload: PatientFieldChangedPayload) => {
+            const channel = channelRef.current;
+            if (!channel || !isRealtimeReady) {
+                return;
+            }
+
+            await channel.send({
+                type: "broadcast",
+                event: PATIENT_FIELD_CHANGED_EVENT,
+                payload,
+            });
+        },
+        [isRealtimeReady],
+    );
+
+    const sendSubmitted = async (payload: PatientSubmittedPayload) => {
+        const channel = channelRef.current;
+        if (!channel || !isRealtimeReady) {
+            return;
+        }
+
+        await channel.send({
+            type: "broadcast",
+            event: PATIENT_SUBMITTED_EVENT,
+            payload,
+        });
+    };
+
+    const clearInactivityTimer = useCallback(() => {
+        if (inactivityTimerRef.current) {
+            clearTimeout(inactivityTimerRef.current);
+            inactivityTimerRef.current = null;
+        }
+    }, []);
+
+    const scheduleInactivePresence = useCallback(() => {
+        clearInactivityTimer();
+        inactivityTimerRef.current = setTimeout(() => {
+            void updatePresenceStatus("inactive");
+        }, INACTIVE_TIMEOUT_MS);
+    }, [clearInactivityTimer, updatePresenceStatus]);
+
+    useEffect(() => {
+        const channel = supabase.channel(PATIENT_INTAKE_CHANNEL, {
+            config: {
+                presence: { key: sessionId },
+            },
+        });
+
+        channelRef.current = channel;
+
+        channel.subscribe((status) => {
+            if (status === "SUBSCRIBED") {
+                setIsRealtimeReady(true);
+                const initialPresence: PatientPresencePayload = {
+                    sessionId,
+                    status: "inactive",
+                    updatedAt: new Date().toISOString(),
+                };
+
+                void channel.track(initialPresence).then((result) => {
+                    if (result === "ok") {
+                        lastTrackedPresenceStatusRef.current = "inactive";
+                        return;
+                    }
+                });
+
+                console.log("Patient connected to Realtime");
+                return;
+            }
+
+            if (
+                status === "CHANNEL_ERROR" ||
+                status === "TIMED_OUT" ||
+                status === "CLOSED"
+            ) {
+                setIsRealtimeReady(false);
+            }
+        });
+
+        return () => {
+            setIsRealtimeReady(false);
+            clearInactivityTimer();
+            lastTrackedPresenceStatusRef.current = null;
+            supabase.removeChannel(channel);
+            channelRef.current = null;
+        };
+    }, [clearInactivityTimer, sessionId]);
+
+    useEffect(() => {
+        const subscription = watch((values, context) => {
+            if (
+                !context.name ||
+                context.type !== "change" ||
+                isResettingRef.current
+            ) {
+                return;
+            }
+
+            const field = context.name as PatientFormField;
+            const payload: PatientFieldChangedPayload = {
+                sessionId,
+                field,
+                value: String(values[field]),
+                updatedAt: new Date().toISOString(),
+            };
+
+            void sendFieldChange(payload);
+            void updatePresenceStatus("typing");
+            scheduleInactivePresence();
+        });
+
+        return () => {
+            subscription.unsubscribe();
+        };
+    }, [
+        scheduleInactivePresence,
+        sendFieldChange,
+        sessionId,
+        updatePresenceStatus,
+        watch,
+    ]);
 
     const onSubmit = async (data: PatientFormValues) => {
         setIsSubmitting(true);
-        setSuccessMessage("");
 
-        console.log("Form Submitted Successfully:", data);
-        setSuccessMessage("Patient registered successfully!");
-        setIsSubmitting(false);
-        reset();
+        try {
+            const payload: PatientSubmittedPayload = {
+                sessionId,
+                values: data,
+                submittedAt: new Date().toISOString(),
+            };
+
+            await sendSubmitted(payload);
+            await updatePresenceStatus("submitted");
+            clearInactivityTimer();
+
+            console.log("Form Submitted Successfully:", data);
+            toast.success("Patient registered successfully!");
+
+            isResettingRef.current = true;
+            reset(patientFormDefaultValues);
+        } catch (error) {
+            console.error("Failed to submit patient form:", error);
+            toast.error("Unable to submit patient form. Please try again.");
+        } finally {
+            isResettingRef.current = false;
+            setIsSubmitting(false);
+        }
     };
 
     return (
@@ -99,7 +257,8 @@ export function PatientForm() {
                 <CardHeader>
                     <CardTitle>Personal Information</CardTitle>
                     <CardDescription>
-                        Please provide the patient's basic personal details.
+                        Please provide the patient&apos;s basic personal
+                        details.
                     </CardDescription>
                 </CardHeader>
                 <CardContent className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -187,9 +346,6 @@ export function PatientForm() {
                                         <SelectItem value="Other">
                                             Other
                                         </SelectItem>
-                                        <SelectItem value="Prefer not to say">
-                                            Prefer not to say
-                                        </SelectItem>
                                     </SelectContent>
                                 </Select>
                             )}
@@ -219,10 +375,39 @@ export function PatientForm() {
 
                     <div className="space-y-2">
                         <Label htmlFor="religion">Religion (Optional)</Label>
-                        <Input
-                            id="religion"
-                            placeholder="e.g. Buddhism, Christianity"
-                            {...register("religion")}
+                        <Controller
+                            name="religion"
+                            control={control}
+                            render={({ field }) => (
+                                <Select
+                                    onValueChange={field.onChange}
+                                    value={field.value}
+                                >
+                                    <SelectTrigger
+                                        id="religion"
+                                        className="w-full"
+                                    >
+                                        <SelectValue placeholder="Select religion" />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                        <SelectItem value="Buddhism">
+                                            Buddhism
+                                        </SelectItem>
+                                        <SelectItem value="Christianity">
+                                            Christianity
+                                        </SelectItem>
+                                        <SelectItem value="Islam">
+                                            Islam
+                                        </SelectItem>
+                                        <SelectItem value="Hinduism">
+                                            Hinduism
+                                        </SelectItem>
+                                        <SelectItem value="Other">
+                                            Other
+                                        </SelectItem>
+                                    </SelectContent>
+                                </Select>
+                            )}
                         />
                     </div>
                 </CardContent>
@@ -273,7 +458,7 @@ export function PatientForm() {
 
                     <div className="space-y-2 md:col-span-2">
                         <Label htmlFor="address">
-                            Full Address <span className="text-red-500">*</span>
+                            Address <span className="text-red-500">*</span>
                         </Label>
                         <Textarea
                             id="address"
@@ -292,10 +477,39 @@ export function PatientForm() {
                             Preferred Language{" "}
                             <span className="text-red-500">*</span>
                         </Label>
-                        <Input
-                            id="preferredLanguage"
-                            placeholder="e.g. Thai, English"
-                            {...register("preferredLanguage")}
+                        <Controller
+                            name="preferredLanguage"
+                            control={control}
+                            render={({ field }) => (
+                                <Select
+                                    onValueChange={field.onChange}
+                                    value={field.value}
+                                >
+                                    <SelectTrigger
+                                        id="preferredLanguage"
+                                        className="w-full"
+                                    >
+                                        <SelectValue placeholder="Select language" />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                        <SelectItem value="Thai">
+                                            Thai
+                                        </SelectItem>
+                                        <SelectItem value="English">
+                                            English
+                                        </SelectItem>
+                                        <SelectItem value="Chinese">
+                                            Chinese
+                                        </SelectItem>
+                                        <SelectItem value="Japanese">
+                                            Japanese
+                                        </SelectItem>
+                                        <SelectItem value="Korean">
+                                            Korean
+                                        </SelectItem>
+                                    </SelectContent>
+                                </Select>
+                            )}
                         />
                         {errors.preferredLanguage && (
                             <p className="text-sm text-red-500">
@@ -330,10 +544,48 @@ export function PatientForm() {
                         <Label htmlFor="emergencyContactRelationship">
                             Relationship
                         </Label>
-                        <Input
-                            id="emergencyContactRelationship"
-                            placeholder="Spouse, Sibling, etc."
-                            {...register("emergencyContactRelationship")}
+                        <Controller
+                            name="emergencyContactRelationship"
+                            control={control}
+                            render={({ field }) => (
+                                <Select
+                                    onValueChange={field.onChange}
+                                    value={field.value}
+                                >
+                                    <SelectTrigger
+                                        id="emergencyContactRelationship"
+                                        className="w-full"
+                                    >
+                                        <SelectValue placeholder="Select relationship" />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                        <SelectItem value="Spouse">
+                                            Spouse
+                                        </SelectItem>
+                                        <SelectItem value="Parent">
+                                            Parent
+                                        </SelectItem>
+                                        <SelectItem value="Child">
+                                            Child
+                                        </SelectItem>
+                                        <SelectItem value="Sibling">
+                                            Sibling
+                                        </SelectItem>
+                                        <SelectItem value="Relative">
+                                            Relative
+                                        </SelectItem>
+                                        <SelectItem value="Friend">
+                                            Friend
+                                        </SelectItem>
+                                        <SelectItem value="Caregiver">
+                                            Caregiver
+                                        </SelectItem>
+                                        <SelectItem value="Other">
+                                            Other
+                                        </SelectItem>
+                                    </SelectContent>
+                                </Select>
+                            )}
                         />
                     </div>
                 </CardContent>
@@ -348,11 +600,6 @@ export function PatientForm() {
                 >
                     {isSubmitting ? "Submitting..." : "Register Patient"}
                 </Button>
-                {successMessage && (
-                    <div className="text-green-600 font-medium w-full text-right">
-                        {successMessage}
-                    </div>
-                )}
             </div>
         </form>
     );
