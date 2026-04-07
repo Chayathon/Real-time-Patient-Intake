@@ -251,14 +251,13 @@ export function PatientForm() {
     return (
         <form
             onSubmit={handleSubmit(onSubmit)}
-            className="space-y-8 w-full max-w-5xl mx-auto"
+            className="space-y-4 md:space-y-6 w-full max-w-5xl mx-auto"
         >
             <Card className="shadow-xl">
                 <CardHeader>
                     <CardTitle>Personal Information</CardTitle>
                     <CardDescription>
-                        Please provide the patient&apos;s basic personal
-                        details.
+                        Please provide the patient's basic personal details.
                     </CardDescription>
                 </CardHeader>
                 <CardContent className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -591,12 +590,12 @@ export function PatientForm() {
                 </CardContent>
             </Card>
 
-            <div className="w-full flex flex-col items-end gap-4">
+            <div className="w-full flex justify-end">
                 <Button
                     disabled={isSubmitting}
                     size="lg"
                     type="submit"
-                    className="w-full sm:w-auto"
+                    className="w-full sm:w-auto font-bold cursor-pointer"
                 >
                     {isSubmitting ? "Submitting..." : "Register Patient"}
                 </Button>
